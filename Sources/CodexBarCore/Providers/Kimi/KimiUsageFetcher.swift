@@ -56,6 +56,13 @@ public struct KimiUsageFetcher: Sendable {
     public static func fetchUsage(authToken: String, now: Date = Date()) async throws -> KimiUsageSnapshot {
         let sessionInfo = self.decodeSessionInfo(from: authToken)
 
+        // Fetch the supplementary monthly subscription stat concurrently with the primary usage
+        // request: the two share no data dependency (both need only authToken + sessionInfo), so
+        // overlapping them avoids adding a serial round-trip to every refresh. fetchSubscriptionStat
+        // swallows its own non-cancellation failures, so a concurrent failure can never fail the
+        // primary fetch; if the primary throws first, this child task is auto-cancelled.
+        async let subscriptionStat = self.fetchSubscriptionStat(authToken: authToken, sessionInfo: sessionInfo)
+
         var request = self.webRequest(url: self.usageURL, authToken: authToken, sessionInfo: sessionInfo)
         let requestBody = ["scope": ["FEATURE_CODING"]]
         request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
@@ -83,8 +90,7 @@ public struct KimiUsageFetcher: Sendable {
             throw KimiAPIError.parseFailed("FEATURE_CODING scope not found in response")
         }
 
-        let subscriptionStat = try await self.fetchSubscriptionStat(authToken: authToken, sessionInfo: sessionInfo)
-        return KimiUsageSnapshot(
+        return try await KimiUsageSnapshot(
             weekly: codingUsage.detail,
             rateLimit: codingUsage.limits?.first?.detail,
             subscriptionBalance: subscriptionStat?.subscriptionBalance,
